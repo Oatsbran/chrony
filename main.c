@@ -464,6 +464,7 @@ print_help(const char *progname)
              "  -P PRIORITY\tSet process priority (0)\n"
              "  -m\t\tLock memory\n"
              "  -x\t\tDon't control clock\n"
+             "  -X\t\tEXPERIMENTAL: use independent raw clock (requires -x)\n"
              "  -N FD\t\tNotify supervisor\n"
              "  -v, --version\tPrint version and exit\n"
              "  -h, --help\tPrint usage and exit\n",
@@ -492,6 +493,31 @@ parse_int_arg(const char *arg)
 
 /* ================================================== */
 
+/* Refuse options that control the system clock or use its timestamps */
+
+static void
+check_independent_clock(int clock_control, int do_init_rtc)
+{
+  double threshold;
+  int limit;
+
+  if (clock_control)
+    LOG_FATAL("Independent raw clock (-X) requires -x");
+
+  CNF_GetMakeStep(&limit, &threshold);
+  if (limit != 0 || CNF_GetInitSources() > 0)
+    LOG_FATAL("makestep and initstepslew not supported with independent raw clock");
+
+  if (do_init_rtc || CNF_GetRtcFile())
+    LOG_FATAL("RTC not supported with independent raw clock");
+
+  /* The null driver cannot step: only slew mode applies the leap second */
+  if (CNF_GetLeapSecMode() != REF_LeapModeSlew)
+    LOG_FATAL("Independent raw clock requires leapsecmode slew");
+}
+
+/* ================================================== */
+
 int main
 (int argc, char **argv)
 {
@@ -504,6 +530,7 @@ int main
   int scfilter_level = 0, lock_memory = 0, sched_priority = 0;
   int clock_control = 1, system_log = 1, log_severity = LOGS_INFO;
   int user_check = 1, config_args = 0, print_config = 0;
+  int independent_clock = 0;
 
   do_platform_checks();
 
@@ -523,7 +550,7 @@ int main
   optind = 1;
 
   /* Parse short command-line options */
-  while ((opt = getopt(argc, argv, "46df:F:hl:L:mnN:pP:qQrRst:u:Uvx")) != -1) {
+  while ((opt = getopt(argc, argv, "46df:F:hl:L:mnN:pP:qQrRst:u:UvxX")) != -1) {
     switch (opt) {
       case '4':
       case '6':
@@ -603,6 +630,9 @@ int main
       case 'x':
         clock_control = 0;
         break;
+      case 'X':
+        independent_clock = 1;
+        break;
       default:
         print_help(progname);
         return opt != 'h';
@@ -665,6 +695,12 @@ int main
   write_pidfile();
 
   PRV_Initialise(scfilter_level);
+
+  if (independent_clock) {
+    check_independent_clock(clock_control, do_init_rtc);
+    LCL_EnableIndependentRawClock();
+  }
+
   LCL_Initialise();
   SCH_Initialise();
   SCK_Initialise(address_family);

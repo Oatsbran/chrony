@@ -395,6 +395,19 @@ NIO_Linux_Initialise(void)
 
   interfaces = ARR_CreateInstance(sizeof (struct Interface));
 
+  /* SW and HW timestamps are in the system clock domain: none with the
+     independent raw clock */
+  if (LCL_IsIndependentRawClock()) {
+    if (CNF_GetHwTsInterface(0, &conf_iface))
+      LOG_FATAL("hwtimestamp not supported with independent raw clock");
+    ts_flags = ts_tx_flags = 0;
+    saved_tx_messages = NULL;
+    last_saved_tx_id = 0;
+    permanent_ts_options = 0;
+    dummy_rxts_socket = INVALID_SOCK_FD;
+    return;
+  }
+
   /* Enable HW timestamping on specified interfaces.  If "*" was specified, try
      all interfaces.  If no interface was specified, enable SW timestamping. */
 

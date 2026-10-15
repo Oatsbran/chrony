@@ -188,6 +188,13 @@ extern double LCL_GetSysPrecisionAsQuantum(void);
    is a frequency stability, not an absolute error. */
 extern double LCL_GetMaxClockError(void);
 
+/* Read the raw time from a private clock advanced by CLOCK_MONOTONIC_RAW and
+   time in suspend (Linux, -x only).  Must be called before LCL_Initialise(). */
+extern void LCL_EnableIndependentRawClock(void);
+
+/* Return non-zero if the private raw clock is enabled */
+extern int LCL_IsIndependentRawClock(void);
+
 /* Routine to initialise the module (to be called once at program
    start-up) */
 

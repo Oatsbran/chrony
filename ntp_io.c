@@ -140,12 +140,15 @@ open_socket(int family, int local_port, int client_only, IPSockAddr *remote_addr
   if (!client_only && family == IPADDR_INET4 && local_addr.port > 0)
     bound_server_sock_fd4 = local_addr.ip_addr.addr.in4 != INADDR_ANY;
 
-  /* Enable kernel/HW timestamping of packets */
+  /* Enable kernel/HW timestamping of packets (not with the independent raw
+     clock: they are in the system clock domain) */
+  if (!LCL_IsIndependentRawClock()) {
 #ifdef HAVE_LINUX_TIMESTAMPING
-  if (!NIO_Linux_SetTimestampSocketOptions(sock_fd, client_only, &events))
+    if (!NIO_Linux_SetTimestampSocketOptions(sock_fd, client_only, &events))
 #endif
-    if (!SCK_EnableKernelRxTimestamping(sock_fd))
-      ;
+      if (!SCK_EnableKernelRxTimestamping(sock_fd))
+        ;
+  }
 
   /* Register handler for read and possibly exception events on the socket */
   SCH_AddFileHandler(sock_fd, events, read_from_socket, NULL);

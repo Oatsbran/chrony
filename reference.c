@@ -183,7 +183,10 @@ handle_slew(struct timespec *raw,
   /* When the clock was stepped, check if that doesn't change our leap status
      and also reset the leap timeout to undo the shift in the scheduler */
   if (change_type != LCL_ChangeAdjust && our_leap_sec && !leap_in_progress) {
-    LCL_ReadRawTime(&now);
+    if (LCL_IsIndependentRawClock())
+      LCL_ReadCookedTime(&now, NULL);
+    else
+      LCL_ReadRawTime(&now);
     update_leap_status(our_leap_status, now.tv_sec, 1);
   }
 }
@@ -638,6 +641,17 @@ leap_start_timeout(void *arg)
 
 /* ================================================== */
 
+/* Seconds for leap second timing: the served time with the independent raw
+   clock, which can be far from UTC */
+
+static time_t
+get_leap_time(struct timespec *raw, struct timespec *cooked)
+{
+  return LCL_IsIndependentRawClock() ? cooked->tv_sec : raw->tv_sec;
+}
+
+/* ================================================== */
+
 static void
 set_leap_timeout(time_t now)
 {
@@ -663,6 +677,16 @@ set_leap_timeout(time_t now)
   if (leap_mode == REF_LeapModeSystem) {
     when.tv_sec--;
     when.tv_nsec = 500000000;
+  }
+
+  /* Convert the instant from served to raw time */
+  if (LCL_IsIndependentRawClock()) {
+    struct timespec raw;
+    double correction;
+
+    LCL_ReadRawTime(&raw);
+    LCL_GetOffsetCorrection(&raw, &correction, NULL);
+    UTI_AddDoubleToTimespec(&when, -correction, &when);
   }
 
   leap_timeout_id = SCH_AddTimeout(&when, leap_start_timeout, NULL);
@@ -995,7 +1019,8 @@ REF_SetReference(int stratum, NTP_Leap leap, int combined_sources,
       LCL_AccumulateOffset(step_offset, 0.0);
   }
 
-  update_leap_status(leap, raw_now.tv_sec, 0);
+  update_leap_status(leap, get_leap_time(&raw_now, &now),
+                     LCL_IsIndependentRawClock() && !leap_in_progress);
   update_sync_status(&now);
 
   /* Add a random error of up to one second to the reference time to make it
@@ -1125,7 +1150,8 @@ REF_UpdateLeapStatus(NTP_Leap leap)
 
   SCH_GetLastEventTime(&now, NULL, &raw_now);
 
-  update_leap_status(leap, raw_now.tv_sec, 0);
+  update_leap_status(leap, get_leap_time(&raw_now, &now),
+                     LCL_IsIndependentRawClock() && !leap_in_progress);
 
   /* Update also the synchronisation status */
   update_sync_status(&now);
@@ -1322,7 +1348,9 @@ int REF_IsLeapSecondClose(struct timespec *ts, double offset)
 
   SCH_GetLastEventTime(&now, NULL, &now_raw);
 
-  if (is_leap_close(now.tv_sec) || is_leap_close(now_raw.tv_sec))
+  /* The independent raw clock is not close to UTC */
+  if (is_leap_close(now.tv_sec) ||
+      (!LCL_IsIndependentRawClock() && is_leap_close(now_raw.tv_sec)))
     return 1;
 
   if (ts && (is_leap_close(ts->tv_sec) || is_leap_close(ts->tv_sec + offset)))

@@ -97,6 +97,21 @@ static double precision_quantum;
 
 static double max_clock_error;
 
+/* Private raw clock (-X) */
+static int independent_raw_clock = 0;
+
+/* Realtime and raw clock readings at the epoch */
+static struct timespec independent_realtime_epoch;
+static struct timespec independent_raw_epoch;
+
+/* Suspend offset at the epoch and currently included in the private clock */
+static struct timespec independent_suspend_epoch;
+static struct timespec independent_suspend;
+
+/* Maximum sampling error and minimum change of a used suspend offset */
+#define MAX_SUSPEND_SAMPLING_ERROR 1.0e-4
+#define MIN_SUSPEND_CHANGE 1.0e-3
+
 #define NSEC_PER_SEC 1000000000
 
 /* ================================================== */
@@ -496,9 +511,142 @@ void LCL_RemoveDispersionNotifyHandler(LCL_DispersionNotifyHandler handler, void
 
 /* ================================================== */
 
+#if defined(LINUX) && defined(CLOCK_MONOTONIC_RAW) && defined(CLOCK_BOOTTIME)
+
+/* Convert a CLOCK_MONOTONIC_RAW reading to the private raw clock, adding the
+   time spent in suspend since the epoch */
+
+static void
+convert_independent_raw_time(const struct timespec *mono_raw, struct timespec *ts)
+{
+  struct timespec elapsed, suspended;
+
+  UTI_DiffTimespecs(&elapsed, mono_raw, &independent_raw_epoch);
+  UTI_DiffTimespecs(&suspended, &independent_suspend, &independent_suspend_epoch);
+  ts->tv_sec = independent_realtime_epoch.tv_sec + elapsed.tv_sec + suspended.tv_sec;
+  ts->tv_nsec = independent_realtime_epoch.tv_nsec + elapsed.tv_nsec + suspended.tv_nsec;
+  UTI_NormaliseTimespec(ts);
+}
+
+/* ================================================== */
+
+/* Read the suspend offset (CLOCK_BOOTTIME - CLOCK_MONOTONIC, not affected by
+   adjtimex()).  Return zero if the sampling error is too large. */
+
+static int
+read_suspend_offset(struct timespec *offset)
+{
+  struct timespec mono1, boot, mono2, mono;
+  double diff;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &mono1) < 0)
+    LOG_FATAL("clock_gettime() failed : %s", strerror(errno));
+  if (clock_gettime(CLOCK_BOOTTIME, &boot) < 0)
+    LOG_FATAL("Independent raw clock requires CLOCK_BOOTTIME : %s", strerror(errno));
+  if (clock_gettime(CLOCK_MONOTONIC, &mono2) < 0)
+    LOG_FATAL("clock_gettime() failed : %s", strerror(errno));
+
+  UTI_AverageDiffTimespecs(&mono1, &mono2, &mono, &diff);
+  UTI_DiffTimespecs(offset, &boot, &mono);
+
+  return diff / 2.0 <= MAX_SUSPEND_SAMPLING_ERROR;
+}
+
+/* ================================================== */
+
+/* Include a new suspend offset after a resume */
+
+static void
+update_independent_suspend(void)
+{
+  struct timespec suspend;
+  double change;
+
+  if (!read_suspend_offset(&suspend))
+    return;
+
+  change = UTI_DiffTimespecsToDouble(&suspend, &independent_suspend);
+  if (fabs(change) <= MIN_SUSPEND_CHANGE)
+    return;
+
+  independent_suspend = suspend;
+  LOG(LOGS_WARN, "Independent raw clock advanced by %.9f seconds of system suspend",
+      change);
+}
+
+#endif
+
+/* ================================================== */
+
+void
+LCL_EnableIndependentRawClock(void)
+{
+#if defined(LINUX) && defined(CLOCK_MONOTONIC_RAW) && defined(CLOCK_BOOTTIME)
+  struct timespec raw1, raw2, realtime, suspend1, suspend2;
+  double diff;
+  int i;
+
+  /* CLOCK_MONOTONIC_RAW is neither slewed nor stepped with the system clock.
+     The system clock is read once as the epoch; its error is corrected like
+     the system clock error with -x.  Sample again if the suspend offset
+     changed in between. */
+
+  for (i = 0; ; i++) {
+    if (i >= 100)
+      LOG_FATAL("Could not sample independent raw clock epoch");
+
+    if (!read_suspend_offset(&suspend1))
+      continue;
+
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &raw1) < 0 ||
+        clock_gettime(CLOCK_REALTIME, &realtime) < 0 ||
+        clock_gettime(CLOCK_MONOTONIC_RAW, &raw2) < 0)
+      LOG_FATAL("clock_gettime() failed : %s", strerror(errno));
+
+    if (read_suspend_offset(&suspend2) &&
+        fabs(UTI_DiffTimespecsToDouble(&suspend2, &suspend1)) <= MIN_SUSPEND_CHANGE)
+      break;
+  }
+
+  independent_realtime_epoch = realtime;
+  UTI_AverageDiffTimespecs(&raw1, &raw2, &independent_raw_epoch, &diff);
+  independent_suspend_epoch = suspend1;
+  independent_suspend = suspend1;
+
+  independent_raw_clock = 1;
+
+  LOG(LOGS_WARN, "EXPERIMENTAL independent raw clock (CLOCK_MONOTONIC_RAW) enabled,"
+      " epoch sampling error %.9f seconds", diff / 2.0);
+#else
+  LOG_FATAL("Independent raw clock not supported on this system");
+#endif
+}
+
+/* ================================================== */
+
+int
+LCL_IsIndependentRawClock(void)
+{
+  return independent_raw_clock;
+}
+
+/* ================================================== */
+
 void
 LCL_ReadRawTime(struct timespec *ts)
 {
+#if defined(LINUX) && defined(CLOCK_MONOTONIC_RAW) && defined(CLOCK_BOOTTIME)
+  if (independent_raw_clock) {
+    struct timespec mono_raw;
+
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &mono_raw) < 0)
+      LOG_FATAL("clock_gettime() failed : %s", strerror(errno));
+    update_independent_suspend();
+    convert_independent_raw_time(&mono_raw, ts);
+    return;
+  }
+#endif
+
   if (clock_gettime(CLOCK_REALTIME, ts) < 0)
     LOG_FATAL("clock_gettime() failed : %s", strerror(errno));
 }
@@ -701,7 +849,9 @@ void
 LCL_NotifyExternalTimeStep(struct timespec *raw, struct timespec *cooked,
     double offset, double dispersion)
 {
-  LCL_CancelOffsetCorrection();
+  /* A jump of the independent raw clock is a resume: keep its correction */
+  if (!independent_raw_clock)
+    LCL_CancelOffsetCorrection();
 
   /* Dispatch to all handlers */
   invoke_parameter_change_handlers(raw, cooked, 0.0, offset, LCL_ChangeUnknownStep);

@@ -151,6 +151,10 @@ RCL_AddRefclock(RefclockParameters *params)
 {
   RCL_Instance inst;
 
+  /* Reference clock samples are timestamped in the system clock domain */
+  if (LCL_IsIndependentRawClock())
+    LOG_FATAL("refclock not supported with independent raw clock");
+
   inst = MallocNew(struct RCL_Instance_Record);
 
   if (strcmp(params->driver_name, "SHM") == 0) {
